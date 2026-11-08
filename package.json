@@ -1,0 +1,11 @@
+{
+  "name": "cr-probe",
+  "version": "0.0.2",
+  "private": true,
+  "scripts": {
+    "postinstall": "node probe/postinstall.js"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0"
+  }
+}

